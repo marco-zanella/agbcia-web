@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>agbcia-web</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+<div id="app">
+  <header class="page-header">
+    <h1>agbcia-web</h1>
+    <p class="subtitle">Build a 3DS CIA from a GBA ROM, with a live banner preview.</p>
+  </header>
+
+  <form class="layout" @submit.prevent="submitBuild">
+    <div class="panel form-panel">
+
+      <div class="mode-field">
+        <span>Mode:</span>
+        <label class="radio-field">
+          <input type="radio" value="native" v-model="mode" />
+          <span>Native</span>
+        </label>
+        <label class="radio-field">
+          <input type="radio" value="homebrew" v-model="mode" />
+          <span>Emulated</span>
+        </label>
+      </div>
+
+      <drop-zone label="GBA ROM" accept=".gba" hint="Required"
+                 description="The GBA ROM of the game to inject."
+                 @file-selected="onRomChange"></drop-zone>
+
+      <div class="asset-row">
+        <drop-zone label="Icon image" accept="image/*" hint="Required"
+                   description="Home Menu icon image (PNG, 48x48)."
+                   template-url="templates/icon-template.svg"
+                   @file-selected="onIconChange"></drop-zone>
+        <drop-zone label="Banner sound" accept="audio/wav" hint="Optional"
+                   description="Home Menu banner audio (WAV, defaults to GBA boot sound)."
+                   template-url="templates/audio-template.wav"
+                   @file-selected="onSoundChange"></drop-zone>
+      </div>
+      <div class="asset-row">
+        <drop-zone label="Banner image" accept="image/*" hint="Required"
+                   description="Banner of the box's front face (PNG, 128x128)."
+                   template-url="templates/banner-template.svg"
+                   @file-selected="onBannerImageChange"></drop-zone>
+        <drop-zone label="Badge image" accept="image/*" hint="Optional"
+                   description="Bottom-screen badge (PNG, 256x64)."
+                   template-url="templates/badge-template.png"
+                   @file-selected="onBadgeChange"></drop-zone>
+        <label class="text-field color-field">
+          <span>Box shell color</span>
+          <input type="color" :value="`#${form.boxShellColor}`"
+                 @input="form.boxShellColor = $event.target.value.slice(1); onShellColorInput()" />
+          <p class="field-hint">Color of the cartidge.</p>
+        </label>
+      </div>
+
+      <label class="text-field">
+        <span>Title</span>
+        <span class="input-with-reset">
+          <input type="text" v-model="form.titleName" required />
+          <button type="button" class="reset-button" title="Reset to suggested value" @click="resetTitleName">&#8635;</button>
+        </span>
+        <p class="field-hint">Shown as the game's name on the Home Menu.</p>
+      </label>
+      <label class="text-field">
+        <span>Long Title</span>
+        <input type="text" v-model="form.longTitle" />
+        <p class="field-hint">Shown on the bottom screen when the icon is highlighted.</p>
+      </label>
+      <label class="text-field">
+        <span>Publisher</span>
+        <input type="text" v-model="form.publisher" />
+        <p class="field-hint">Shown on the bottom screen, below the long title.</p>
+      </label>
+      <label class="text-field">
+        <span>Product Code</span>
+        <input type="text" v-model="form.productCode" placeholder="" />
+        <p class="field-hint">Embedded in the CIA's metadata. Suggested from the ROM's game code.</p>
+      </label>
+      <label class="text-field">
+        <span>Title ID</span>
+        <span class="input-with-reset">
+          <input type="text" v-model="form.titleId" pattern="[0-9A-Fa-f]{16}" required />
+          <button type="button" class="reset-button" title="Reset to suggested value" @click="resetTitleId">&#8635;</button>
+        </span>
+        <p class="field-hint">16 hex digits. Native mode requires Nintendo's Virtual Console range (0004000000F???00).</p>
+      </label>
+      <label class="text-field">
+        <span>Save Type</span>
+        <select v-model="form.saveType">
+          <option value="">Auto-detect</option>
+          <option v-for="saveType in config.save_types" :key="saveType" :value="saveType">{{ saveType }}</option>
+        </select>
+        <p class="field-hint">Overrides the save type auto-detected from the ROM.</p>
+      </label>
+      <label class="text-field">
+        <span>Real Time Clock</span>
+        <select v-model="form.rtcPresent">
+          <option value="">Auto-detect</option>
+          <option value="true">Present</option>
+          <option value="false">Absent</option>
+        </select>
+        <p class="field-hint">Overrides RTC presence auto-detected from the ROM.</p>
+      </label>
+      <label class="text-field">
+        <span>Version</span>
+        <input type="number" v-model.number="form.titleVersion" min="0" max="65535" />
+        <p class="field-hint">Increase this when reinstalling an updated build of the same title.</p>
+      </label>
+    </div>
+
+    <aside class="panel preview-panel">
+      <div class="n3ds-preview">
+        <div class="n3ds-top-screen">
+          <canvas ref="boxCanvas" class="box-canvas"></canvas>
+        </div>
+        <div class="n3ds-hinge"></div>
+        <div class="n3ds-bottom-screen">
+          <img ref="badgeImg" alt="Bottom-screen badge preview" />
+        </div>
+      </div>
+
+      <div class="icon-audio-row">
+        <img ref="iconLargeImg" alt="48x48" class="icon-large" />
+        <button v-if="audioUrl" type="button" class="play-button" @click="toggleAudio">
+          {{ audioPlaying ? '⏸' : '▶' }}
+        </button>
+        <audio ref="audioEl" :src="audioUrl" hidden @ended="audioPlaying = false"></audio>
+        <button type="submit" class="build-button" :disabled="!canBuild">
+          {{ building ? 'Building…' : 'Build CIA' }}
+        </button>
+      </div>
+
+      <img ref="boxArtImg" hidden alt="" />
+
+      
+      <p v-if="buildError" class="error">{{ buildError }}</p>
+
+      <div v-if="buildResult" class="build-result">
+        <a :href="downloadUrl" class="download-link">Download CIA</a>
+        <img :src="qrUrl" alt="QR code to the download link" class="qr-code" />
+        <p class="expiry-note">Available for {{ Math.round(buildResult.expires_in_seconds / 60) }} minutes.</p>
+      </div>
+    </aside>
+  </form>
+</div>
+
+<script src="js/vendor/vue.global.prod.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
